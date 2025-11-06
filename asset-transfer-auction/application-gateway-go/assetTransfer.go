@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"strconv"
 	"time"
 
 	"github.com/hyperledger/fabric-gateway/pkg/client"
@@ -22,21 +23,177 @@ import (
 	"google.golang.org/grpc/credentials"
 )
 
-const (
-	mspID        = "Org1MSP"
-	cryptoPath   = "../../test-network/organizations/peerOrganizations/org1.example.com"
-	certPath     = cryptoPath + "/users/User1@org1.example.com/msp/signcerts"
-	keyPath      = cryptoPath + "/users/User1@org1.example.com/msp/keystore"
-tlsCertPath  = cryptoPath + "/peers/peer0.org1.example.com/tls/ca.crt"
-	peerEndpoint = "dns:///localhost:7051"
-	gatewayPeer  = "peer0.org1.example.com"
+var (
+	mspID string
+	cryptoPath string
+	certPath string
+	keyPath string
+	tlsCertPath string
+	peerEndpoint string
+	gatewayPeer string
 )
+
+func setAndGetConnectionDetails(org string, user string) {
+	switch org {
+	case "org1":
+		mspID = "Org1MSP"
+		cryptoPath = "../../test-network/organizations/peerOrganizations/org1.example.com"
+		peerEndpoint = "localhost:7051"
+		gatewayPeer = "peer0.org1.example.com"
+	case "org2":
+		mspID = "Org2MSP"
+		cryptoPath = "../../test-network/organizations/peerOrganizations/org2.example.com"
+		peerEndpoint = "localhost:9051"
+		gatewayPeer = "peer0.org2.example.com"
+	default:
+		panic(fmt.Errorf("unknown organization: %s", org))
+	}
+
+	if user == "admin" {
+		certPath = cryptoPath + "/users/Admin@" + org + ".example.com/msp/signcerts"
+		keyPath = cryptoPath + "/users/Admin@" + org + ".example.com/msp/keystore"
+	} else {
+		certPath = cryptoPath + "/users/" + user + "@" + org + ".example.com/msp/signcerts"
+		keyPath = cryptoPath + "/users/" + user + "@" + org + ".example.com/msp/keystore"
+	}
+	tlsCertPath = cryptoPath + "/peers/peer0." + org + ".example.com/tls/ca.crt"
+}
 
 var now = time.Now()
 var assetId = fmt.Sprintf("asset%d", now.Unix()*1e3+int64(now.Nanosecond())/1e6)
 var auctionId = fmt.Sprintf("auction%d", now.Unix()*1e3+int64(now.Nanosecond())/1e6)
 
 func main() {
+	if len(os.Args) < 2 {
+		printUsage()
+		os.Exit(1)
+	}
+
+	command := os.Args[1]
+
+	switch command {
+	case "enrollAdmin":
+		if len(os.Args) != 3 {
+			fmt.Println("Usage: go run assetTransfer.go enrollAdmin <org>")
+			os.Exit(1)
+		}
+		org := os.Args[2]
+		enrollAdmin(org)
+	case "registerUser":
+		if len(os.Args) != 4 {
+			fmt.Println("Usage: go run assetTransfer.go registerUser <org> <user>")
+			os.Exit(1)
+		}
+		org := os.Args[2]
+		user := os.Args[3]
+		registerUser(org, user)
+	case "initLedger":
+		if len(os.Args) != 2 {
+			fmt.Println("Usage: go run assetTransfer.go initLedger")
+			os.Exit(1)
+		}
+		runApplication(command, "org1", "User1") // Default user for initLedger
+	case "createAsset":
+		if len(os.Args) != 7 {
+			fmt.Println("Usage: go run assetTransfer.go createAsset <id> <color> <size> <owner> <appraisedValue>")
+			os.Exit(1)
+		}
+		runApplication(command, "org1", "User1", os.Args[2], os.Args[3], os.Args[4], os.Args[5], os.Args[6])
+	case "createAuction":
+		if len(os.Args) != 4 {
+			fmt.Println("Usage: go run assetTransfer.go createAuction <auctionID> <itemSold>")
+			os.Exit(1)
+		}
+		runApplication(command, "org1", "User1", os.Args[2], os.Args[3])
+	case "bid":
+		if len(os.Args) != 6 {
+			fmt.Println("Usage: go run assetTransfer.go bid <org> <user> <auctionID> <price>")
+			os.Exit(1)
+		}
+		org := os.Args[2]
+		user := os.Args[3]
+		auctionID := os.Args[4]
+		price := os.Args[5]
+		runApplication(command, org, user, auctionID, price)
+	case "submitBid":
+		if len(os.Args) != 6 {
+			fmt.Println("Usage: go run assetTransfer.go submitBid <org> <user> <auctionID> <txID>")
+			os.Exit(1)
+		}
+		org := os.Args[2]
+		user := os.Args[3]
+		auctionID := os.Args[4]
+		txID := os.Args[5]
+		runApplication(command, org, user, auctionID, txID)
+	case "closeAuction":
+		if len(os.Args) != 5 {
+			fmt.Println("Usage: go run assetTransfer.go closeAuction <org> <user> <auctionID>")
+			os.Exit(1)
+		}
+		org := os.Args[2]
+		user := os.Args[3]
+		auctionID := os.Args[4]
+		runApplication(command, org, user, auctionID)
+	case "revealBid":
+		if len(os.Args) != 7 {
+			fmt.Println("Usage: go run assetTransfer.go revealBid <org> <user> <auctionID> <txID> <price>")
+			os.Exit(1)
+		}
+		org := os.Args[2]
+		user := os.Args[3]
+		auctionID := os.Args[4]
+		txID := os.Args[5]
+		price := os.Args[6]
+		runApplication(command, org, user, auctionID, txID, price)
+	case "endAuction":
+		if len(os.Args) != 5 {
+			fmt.Println("Usage: go run assetTransfer.go endAuction <org> <user> <auctionID>")
+			os.Exit(1)
+		}
+		org := os.Args[2]
+		user := os.Args[3]
+		auctionID := os.Args[4]
+		runApplication(command, org, user, auctionID)
+	case "getAllAssets":
+		if len(os.Args) != 3 {
+			fmt.Println("Usage: go run assetTransfer.go getAllAssets <org>")
+			os.Exit(1)
+		}
+		org := os.Args[2]
+		runApplication(command, org, "User1") // Default user for querying
+	case "readAsset":
+		if len(os.Args) != 4 {
+			fmt.Println("Usage: go run assetTransfer.go readAsset <org> <assetID>")
+			os.Exit(1)
+		}
+		org := os.Args[2]
+		assetID := os.Args[3]
+		runApplication(command, org, "User1", assetID) // Default user for querying
+	default:
+		printUsage()
+		os.Exit(1)
+	}
+}
+
+func printUsage() {
+	fmt.Println("Usage:")
+	fmt.Println("  go run assetTransfer.go enrollAdmin <org>")
+	fmt.Println("  go run assetTransfer.go registerUser <org> <user>")
+	fmt.Println("  go run assetTransfer.go initLedger")
+	fmt.Println("  go run assetTransfer.go createAsset <id> <color> <size> <owner> <appraisedValue>")
+	fmt.Println("  go run assetTransfer.go createAuction <auctionID> <itemSold>")
+	fmt.Println("  go run assetTransfer.go bid <org> <user> <auctionID> <price>")
+	fmt.Println("  go run assetTransfer.go submitBid <org> <user> <auctionID> <txID>")
+	fmt.Println("  go run assetTransfer.go closeAuction <org> <user> <auctionID>")
+	fmt.Println("  go run assetTransfer.go revealBid <org> <user> <auctionID> <txID> <price>")
+	fmt.Println("  go run assetTransfer.go endAuction <org> <user> <auctionID>")
+	fmt.Println("  go run assetTransfer.go getAllAssets <org>")
+	fmt.Println("  go run assetTransfer.go readAsset <org> <assetID>")
+}
+
+func runApplication(command string, org string, user string, args ...string) {
+	setAndGetConnectionDetails(org, user)
+
 	// The gRPC client connection should be shared by all Gateway connections to this endpoint
 	clientConnection := newGrpcConnection()
 	defer clientConnection.Close()
@@ -62,7 +219,7 @@ func main() {
 	defer gw.Close()
 
 	// Override default values for chaincode and channel name as they may differ in testing contexts.
-	chaincodeName := "basic"
+	chaincodeName := "auction" // Changed from "basic" to "auction"
 	if ccname := os.Getenv("CHAINCODE_NAME"); ccname != "" {
 		chaincodeName = ccname
 	}
@@ -75,34 +232,34 @@ func main() {
 	network := gw.GetNetwork(channelName)
 	contract := network.GetContract(chaincodeName)
 
-	initLedger(contract)
-	getAllAssets(contract)
-	createAsset(contract)
-	readAssetByID(contract)
-
-	// Create an auction for the asset
-	createAuction(contract, auctionId, assetId)
-
-	// Bid on the auction
-	txID, err := bid(contract, auctionId, 1500)
-	if err != nil {
-		panic(err)
+	switch command {
+	case "initLedger":
+		initLedger(contract)
+	case "createAsset":
+		createAsset(contract, args[0], args[1], args[2], args[3], args[4])
+	case "createAuction":
+		createAuction(contract, args[0], args[1])
+	case "bid":
+		price, _ := strconv.Atoi(args[2])
+		bid(contract, args[0], price, user, org)
+	case "submitBid":
+		submitBid(contract, args[0], args[1], user, org)
+	case "closeAuction":
+		closeAuction(contract, args[0], user, org)
+	case "revealBid":
+		price, _ := strconv.Atoi(args[3])
+		revealBid(contract, args[0], args[1], price, user, org)
+	case "endAuction":
+		endAuction(contract, args[0], user, org)
+	case "getAllAssets":
+		getAllAssets(contract)
+	case "readAsset":
+		readAssetByID(contract, args[0])
+	default:
+		fmt.Printf("Unknown command: %s\n", command)
+		printUsage()
+		os.Exit(1)
 	}
-
-	// Submit the bid
-	submitBid(contract, auctionId, txID)
-
-	// Close the auction
-	closeAuction(contract, auctionId)
-
-	// Reveal the bid
-	revealBid(contract, auctionId, txID)
-
-	// End the auction
-	endAuction(contract, auctionId)
-
-	// Read the asset again to see the new owner
-	readAssetByID(contract)
 }
 
 // newGrpcConnection creates a gRPC connection to the Gateway server.
@@ -183,6 +340,32 @@ func readFirstFile(dirPath string) ([]byte, error) {
 	return os.ReadFile(path.Join(dirPath, fileNames[0]))
 }
 
+// enrollAdmin is a convenience placeholder to match the CLI used in the README.
+// The Go application gateway in these samples does not include a Fabric CA client
+// implementation for registering/enrolling identities. Identities are typically
+// provisioned by the `test-network` scripts or by the JavaScript helper
+// scripts in the samples (see README). This function prints guidance instead
+// of attempting enrollment.
+func enrollAdmin(org string) {
+	fmt.Printf("\nNote: this sample's Go application does not implement CA enrollment.\n")
+	fmt.Printf("Please use the test-network scripts or the JavaScript enrollment helper.\n")
+	fmt.Printf("For example, from the `fabric-samples` directory run:\n")
+	fmt.Printf("  cd test-network && ./network.sh up createChannel -ca\n")
+	fmt.Printf("Then run one of the provided enroll scripts, for example:\n")
+	fmt.Printf("  node ../asset-transfer-auction/application-javascript/enrollAdmin.js org1\n")
+	fmt.Printf("or use the CA utilities under test-application/javascript.\n\n")
+}
+
+// registerUser is a placeholder that mirrors the README command but delegates
+// identity provisioning to the JavaScript helpers or the network scripts.
+func registerUser(org string, user string) {
+	fmt.Printf("\nNote: this sample's Go application does not implement CA registration/enrollment for users.\n")
+	fmt.Printf("Please use one of the sample JavaScript scripts to register and enroll users.\n")
+	fmt.Printf("For example:\n")
+	fmt.Printf("  node ../asset-transfer-auction/application-javascript/registerEnrollUser.js %s %s\n", org, user)
+	fmt.Printf("or use the helpers in test-application/javascript (buildCAClient/registerAndEnrollUser).\n\n")
+}
+
 // This type of transaction would typically only be run once by an application the first time it was started after its
 // initial deployment. A new version of the chaincode deployed later would likely not need to run an "init" function.
 func initLedger(contract *client.Contract) {
@@ -261,7 +444,7 @@ func bid(contract *client.Contract, auctionID string, price int) (string, error)
 	}
 	transientData["bid"] = bidJSON
 
-	submitResult, _, err := contract.SubmitAsync("Bid", client.WithTransient(transientData), client.WithArguments(auctionID))
+	submitResult, _, err := contract.SubmitAsync("Bid", client.WithTransient(transientData), client.WithArguments(auctionID), client.WithEndorsingOrganizations(mspID))
 	if err != nil {
 		return "", err
 	}

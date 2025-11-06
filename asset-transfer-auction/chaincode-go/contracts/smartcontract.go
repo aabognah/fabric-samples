@@ -10,6 +10,8 @@ import (
 
 	"github.com/hyperledger/fabric-chaincode-go/v2/pkg/statebased"
 	"github.com/hyperledger/fabric-contract-api-go/v2/contractapi"
+	"github.com/hyperledger/fabric-protos-go-apiv2/msp"
+	"google.golang.org/protobuf/proto"
 )
 
 // SmartContract provides functions for managing an Asset
@@ -377,6 +379,11 @@ func (s *SmartContract) SubmitBid(ctx contractapi.TransactionContextInterface, a
 	if !(contains(Orgs, clientOrgID)) {
 		newOrgs := append(Orgs, clientOrgID)
 		auction.Orgs = newOrgs
+
+		err = addAssetStateBasedEndorsement(ctx, auctionID, clientOrgID)
+		if err != nil {
+			return fmt.Errorf("failed setting state based endorsement for new organization: %v", err)
+		}
 	}
 
 	newAuctionJSON, _ := json.Marshal(auction)
@@ -644,6 +651,52 @@ func (s *SmartContract) QueryAuction(ctx contractapi.TransactionContextInterface
 	return &auction, nil
 }
 
+// QueryBid allows the submitter of the bid to read their bid from their org's private data
+func (s *SmartContract) QueryBid(ctx contractapi.TransactionContextInterface, auctionID string, txID string) (*FullBid, error) {
+
+	// Ensure the client is querying from a peer belonging to their org
+	err := verifyClientOrgMatchesPeerOrg(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get implicit collection name: %v", err)
+	}
+
+	clientID, err := s.GetSubmittingClientIdentity(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get client identity %v", err)
+	}
+
+	collection, err := getCollectionName(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get implicit collection name: %v", err)
+	}
+
+	bidKey, err := ctx.GetStub().CreateCompositeKey(bidKeyType, []string{auctionID, txID})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create composite key: %v", err)
+	}
+
+	bidJSON, err := ctx.GetStub().GetPrivateData(collection, bidKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get bid %v: %v", bidKey, err)
+	}
+	if bidJSON == nil {
+		return nil, fmt.Errorf("bid %v does not exist", bidKey)
+	}
+
+	var bid FullBid
+	err = json.Unmarshal(bidJSON, &bid)
+	if err != nil {
+		return nil, err
+	}
+
+	// check that the client querying the bid is the bid owner
+	if bid.Bidder != clientID {
+		return nil, fmt.Errorf("permission denied, client id %v is not the owner of the bid", clientID)
+	}
+
+	return &bid, nil
+}
+
 func (s *SmartContract) GetSubmittingClientIdentity(ctx contractapi.TransactionContextInterface) (string, error) {
 
 	b64ID, err := ctx.GetClientIdentity().GetID()
@@ -672,12 +725,22 @@ func verifyClientOrgMatchesPeerOrg(ctx contractapi.TransactionContextInterface) 
 	if err != nil {
 		return fmt.Errorf("failed getting the client's MSPID: %v", err)
 	}
-	peerMSPID, err := ctx.GetStub().GetCreator()
+	peerCreator, err := ctx.GetStub().GetCreator()
 	if err != nil {
-		return fmt.Errorf("failed getting the peer's MSPID: %v", err)
+		return fmt.Errorf("failed getting the peer's creator: %v", err)
 	}
 
-	if clientMSPID != string(peerMSPID) {
+	// Extract MSPID from the creator's serialized identity
+	signedData := &msp.SerializedIdentity{}
+	err = proto.Unmarshal(peerCreator, signedData)
+	if err != nil {
+		return fmt.Errorf("failed to unmarshal creator: %v", err)
+	}
+	peerMSPID := signedData.GetMspid()
+
+	log.Printf("Client MSPID: %s, Peer MSPID: %s", clientMSPID, peerMSPID)
+
+	if clientMSPID != peerMSPID {
 		return fmt.Errorf("client from org %v is not authorized to read or write private data from an org %v peer", clientMSPID, peerMSPID)
 	}
 
