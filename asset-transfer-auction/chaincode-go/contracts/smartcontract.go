@@ -3,10 +3,14 @@ package chaincode
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"strconv"
+	"regexp"
+	"strings"
 
 	"github.com/hyperledger/fabric-chaincode-go/v2/pkg/statebased"
 	"github.com/hyperledger/fabric-contract-api-go/v2/contractapi"
@@ -25,6 +29,8 @@ type Asset struct {
 	Color          string `json:"Color"`
 	ID             string `json:"ID"`
 	Owner          string `json:"Owner"`
+	// OwnerLabel is a short, human-friendly label for the owner (e.g. "org1/seller")
+	OwnerLabel     string `json:"OwnerLabel"`
 	Size           int    `json:"Size"`
 }
 
@@ -60,12 +66,12 @@ const bidKeyType = "bid"
 // InitLedger adds a base set of assets to the ledger
 func (s *SmartContract) InitLedger(ctx contractapi.TransactionContextInterface) error {
 	assets := []Asset{
-		{ID: "asset1", Color: "blue", Size: 5, Owner: "Tomoko", AppraisedValue: 300},
-		{ID: "asset2", Color: "red", Size: 5, Owner: "Brad", AppraisedValue: 400},
-		{ID: "asset3", Color: "green", Size: 10, Owner: "Jin Soo", AppraisedValue: 500},
-		{ID: "asset4", Color: "yellow", Size: 10, Owner: "Max", AppraisedValue: 600},
-		{ID: "asset5", Color: "black", Size: 15, Owner: "Adriana", AppraisedValue: 700},
-		{ID: "asset6", Color: "white", Size: 15, Owner: "Michel", AppraisedValue: 800},
+		{ID: "asset1", Color: "blue", Size: 5, Owner: "Tomoko", OwnerLabel: "Tomoko", AppraisedValue: 300},
+		{ID: "asset2", Color: "red", Size: 5, Owner: "Brad", OwnerLabel: "Brad", AppraisedValue: 400},
+		{ID: "asset3", Color: "green", Size: 10, Owner: "Jin Soo", OwnerLabel: "Jin Soo", AppraisedValue: 500},
+		{ID: "asset4", Color: "yellow", Size: 10, Owner: "Max", OwnerLabel: "Max", AppraisedValue: 600},
+		{ID: "asset5", Color: "black", Size: 15, Owner: "Adriana", OwnerLabel: "Adriana", AppraisedValue: 700},
+		{ID: "asset6", Color: "white", Size: 15, Owner: "Michel", OwnerLabel: "Michel", AppraisedValue: 800},
 	}
 
 	for _, asset := range assets {
@@ -93,11 +99,15 @@ func (s *SmartContract) CreateAsset(ctx contractapi.TransactionContextInterface,
 		return fmt.Errorf("the asset %s already exists", id)
 	}
 
+	// Derive an owner label where possible (attempt to decode serialized identity)
+	ownerLabel := deriveOwnerLabel(owner)
+
 	asset := Asset{
 		ID:             id,
 		Color:          color,
 		Size:           size,
 		Owner:          owner,
+		OwnerLabel:     ownerLabel,
 		AppraisedValue: appraisedValue,
 	}
 	assetJSON, err := json.Marshal(asset)
@@ -138,11 +148,14 @@ func (s *SmartContract) UpdateAsset(ctx contractapi.TransactionContextInterface,
 	}
 
 	// overwriting original asset with new asset
+	ownerLabel := deriveOwnerLabel(owner)
+
 	asset := Asset{
 		ID:             id,
 		Color:          color,
 		Size:           size,
 		Owner:          owner,
+		OwnerLabel:     ownerLabel,
 		AppraisedValue: appraisedValue,
 	}
 	assetJSON, err := json.Marshal(asset)
@@ -185,6 +198,8 @@ func (s *SmartContract) TransferAsset(ctx contractapi.TransactionContextInterfac
 
 	oldOwner := asset.Owner
 	asset.Owner = newOwner
+	// update OwnerLabel as well
+	asset.OwnerLabel = deriveOwnerLabel(newOwner)
 
 	assetJSON, err := json.Marshal(asset)
 	if err != nil {
@@ -219,7 +234,12 @@ func (s *SmartContract) GetAllAssets(ctx contractapi.TransactionContextInterface
 		var asset Asset
 		err = json.Unmarshal(queryResponse.Value, &asset)
 		if err != nil {
-			return nil, err
+			// If unmarshalling to Asset fails, skip this entry rather than failing the whole query
+			continue
+		}
+		// Only include entries that look like assets (they should have a non-empty ID)
+		if asset.ID == "" {
+			continue
 		}
 		assets = append(assets, &asset)
 	}
@@ -623,6 +643,26 @@ func (s *SmartContract) EndAuction(ctx contractapi.TransactionContextInterface, 
 
 	// Transfer asset to the winner
 	if auction.Winner != "" {
+		// Before transferring ownership, move the asset's AppraisedValue from buyer to seller
+		asset, err := s.ReadAsset(ctx, auction.ItemSold)
+		if err != nil {
+			return fmt.Errorf("failed to read asset for payment: %v", err)
+		}
+		amount := asset.AppraisedValue
+
+		// Debit buyer
+		_, err = s.AdjustBalance(ctx, auction.Winner, -amount)
+		if err != nil {
+			return fmt.Errorf("failed to debit buyer: %v", err)
+		}
+
+		// Credit seller
+		_, err = s.AdjustBalance(ctx, auction.Seller, amount)
+		if err != nil {
+			return fmt.Errorf("failed to credit seller: %v", err)
+		}
+
+		// Now transfer the asset
 		_, err = s.TransferAsset(ctx, auction.ItemSold, auction.Winner)
 		if err != nil {
 			return fmt.Errorf("failed to transfer asset to winner: %v", err)
@@ -804,6 +844,111 @@ func contains(s []string, e string) bool {
 		}
 	}
 	return false
+}
+
+// deriveOwnerLabel tries to transform an owner identifier (often a base64
+// serialized identity) into a short human-friendly label such as
+// "org1/seller" or "department11/seller". If no reasonable label can be
+// extracted, it returns the decoded or original owner string.
+func deriveOwnerLabel(owner string) string {
+	// try base64 decode
+	decoded := owner
+	if b, err := base64.StdEncoding.DecodeString(owner); err == nil {
+		decoded = string(b)
+	}
+
+	// Try to extract CN and OU from the decoded identity
+	reCN := regexp.MustCompile(`CN=([^,\n]+)`)
+	reOU := regexp.MustCompile(`OU=([^,\n]+)`)
+	reO := regexp.MustCompile(`O=([^,\n]+)`)
+	cn := ""
+	ou := ""
+	if m := reCN.FindStringSubmatch(decoded); len(m) > 1 {
+		cn = m[1]
+	}
+	if m := reOU.FindStringSubmatch(decoded); len(m) > 1 {
+		ou = m[1]
+	}
+
+	if cn != "" {
+		// Prefer using organization (O) when available, falling back to OU
+		if oMatch := reO.FindStringSubmatch(decoded); len(oMatch) > 1 {
+			// map 'org1.example.com' -> 'org1'
+			orgFull := oMatch[1]
+			orgParts := strings.Split(orgFull, ".")
+			org := strings.ToLower(orgParts[0])
+			return fmt.Sprintf("%s/%s", org, cn)
+		}
+		// Normalize OU -> lowercase, remove spaces
+		if ou != "" {
+			normOU := strings.ToLower(strings.ReplaceAll(ou, " ", ""))
+			return fmt.Sprintf("%s/%s", normOU, cn)
+		}
+		return cn
+	}
+
+	// No CN found; return decoded string as-is
+	return decoded
+}
+
+const defaultBalance = 1000
+
+// balance key helper
+func balanceKey(ctx contractapi.TransactionContextInterface, owner string) (string, error) {
+	return ctx.GetStub().CreateCompositeKey("balance", []string{owner})
+}
+
+// GetBalance returns the balance for owner, creating a default if missing.
+func (s *SmartContract) GetBalance(ctx contractapi.TransactionContextInterface, owner string) (int, error) {
+	key, err := balanceKey(ctx, owner)
+	if err != nil {
+		return 0, err
+	}
+	b, err := ctx.GetStub().GetState(key)
+	if err != nil {
+		return 0, err
+	}
+	if b == nil {
+		// initialize default balance
+		if err := ctx.GetStub().PutState(key, []byte(strconv.Itoa(defaultBalance))); err != nil {
+			return 0, err
+		}
+		return defaultBalance, nil
+	}
+	bal, err := strconv.Atoi(string(b))
+	if err != nil {
+		return 0, err
+	}
+	return bal, nil
+}
+
+// GetMyBalance returns the balance for the submitting client identity.
+func (s *SmartContract) GetMyBalance(ctx contractapi.TransactionContextInterface) (int, error) {
+	clientID, err := s.GetSubmittingClientIdentity(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get client identity: %v", err)
+	}
+	return s.GetBalance(ctx, clientID)
+}
+
+// AdjustBalance adjusts the owner's balance by delta (can be negative). Returns new balance.
+func (s *SmartContract) AdjustBalance(ctx contractapi.TransactionContextInterface, owner string, delta int) (int, error) {
+	key, err := balanceKey(ctx, owner)
+	if err != nil {
+		return 0, err
+	}
+	bal, err := s.GetBalance(ctx, owner)
+	if err != nil {
+		return 0, err
+	}
+	newBal := bal + delta
+	if newBal < 0 {
+		return 0, fmt.Errorf("insufficient funds: have %d, need %d", bal, -delta)
+	}
+	if err := ctx.GetStub().PutState(key, []byte(strconv.Itoa(newBal))); err != nil {
+		return 0, err
+	}
+	return newBal, nil
 }
 
 func checkForHigherBid(ctx contractapi.TransactionContextInterface, highestPrice int, revealedBids map[string]FullBid, privateBids map[string]BidHash) error {

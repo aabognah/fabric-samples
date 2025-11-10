@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Run a full demo of the asset-transfer-auction sample
-# Usage: run_demo.sh [--reuse-network] [--redeploy-cc] [--client js|go] [--cleanup]
+# Usage: run_demo.sh [--reuse-network] [--redeploy-cc] [--reuse-wallets] [--client js|go] [--cleanup]
 # - --reuse-network : use existing running test-network (do not bring it up)
 # - --redeploy-cc   : redeploy chaincode (package/install/approve/commit)
+# - --reuse-wallets : reuse existing enrolled users/admins (skip enroll/register)
 # - --client        : choose client 'js' (default) or 'go'
 # - --cleanup       : bring the network down at the end and remove wallets
 
@@ -22,8 +23,11 @@ REUSE_NETWORK=false
 REDEPLOY_CC=false
 CLIENT="js"
 CLEANUP=false
+INSTALL_DEPS=false
 # If true, reuse existing enrolled admins/users (wallets) instead of running enrollment scripts
 REUSE_WALLETS=false
+# If true, force re-enroll: delete existing wallets before enrollment (useful after network recreate)
+FORCE_ENROLL=false
 
 function usage() {
   cat <<EOF
@@ -31,6 +35,7 @@ Usage: $(basename "$0") [options]
 Options:
   --reuse-network       Use an existing running test-network (don't bring it up)
   --redeploy-cc         Redeploy chaincode before running demo
+  --reuse-wallets       Reuse existing JS wallets in application-javascript/wallet (skip enroll/register)
   --client js|go        Choose client implementation to run demo (default: js)
   --cleanup             Bring down network and remove wallets at the end
   -h, --help            Show this help
@@ -44,15 +49,17 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --reuse-network) REUSE_NETWORK=true; shift ;;
     --redeploy-cc) REDEPLOY_CC=true; shift ;;
-      --reuse-wallets) REUSE_WALLETS=true; shift ;;
+    --reuse-wallets) REUSE_WALLETS=true; shift ;;
+    --force-enroll) FORCE_ENROLL=true; shift ;;
     --client) CLIENT="$2"; shift 2 ;;
     --cleanup) CLEANUP=true; shift ;;
+    --install-deps) INSTALL_DEPS=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown arg: $1"; usage; exit 1 ;;
   esac
 done
 
-echo "Demo settings: REUSE_NETWORK=$REUSE_NETWORK, REDEPLOY_CC=$REDEPLOY_CC, REUSE_WALLETS=$REUSE_WALLETS, CLIENT=$CLIENT, CLEANUP=$CLEANUP"
+echo "Demo settings: REUSE_NETWORK=$REUSE_NETWORK, REDEPLOY_CC=$REDEPLOY_CC, REUSE_WALLETS=$REUSE_WALLETS, FORCE_ENROLL=$FORCE_ENROLL, CLIENT=$CLIENT, CLEANUP=$CLEANUP"
 
 # helper to run a command and echo it
 run() { echo "+ $*"; "$@"; }
@@ -82,14 +89,22 @@ if [ "$CLIENT" = "js" ]; then
   echo "Running demo with JavaScript client"
   pushd "$APP_JS_DIR" >/dev/null
 
-  echo "Installing Node dependencies (npm ci)..."
-  if [ -f package-lock.json ]; then
-    run npm ci
-  else
-    run npm install
+  if [ "$INSTALL_DEPS" = true ]; then
+    echo "Installing Node dependencies (npm ci)..."
+    if [ -f package-lock.json ]; then
+      run npm ci
+    else
+      run npm install
+    fi
   fi
 
   echo "Enrolling CA admins and registering users..."
+  # If FORCE_ENROLL is set, remove any existing wallets so we re-enroll against the (possibly new) CA
+  if [ "$FORCE_ENROLL" = true ]; then
+    echo "--force-enroll specified: removing existing wallets to force fresh enrollment"
+    rm -rf wallet || true
+  fi
+
   # If the user asked to reuse wallets, only skip enrollment/register when wallet directories exist.
   if [ "$REUSE_WALLETS" = true ]; then
     if [ -d "wallet/org1" ] && [ -d "wallet/org2" ]; then
@@ -119,52 +134,61 @@ if [ "$CLIENT" = "js" ]; then
   fi
 
   echo "Creating asset via JS createAsset.js..."
-  # create asset: asset1 blue 5 seller 1300
-  run node createAsset.js org1 seller asset1 blue 5 seller 1300
+  # create asset: asset4 blue 5 seller 500
+  run node createAsset.js org1 seller asset4 blue 5 seller 500
 
   echo "Creating auction (seller)..."
-  run node createAuction.js org1 seller auction1 asset1
+  run node createAuction.js org1 seller auction4 asset4
 
   echo "Bidding and submitting bids"
   # bidder1
-  OUT=$(node bid.js org1 bidder1 auction1 800)
+  OUT=$(node bid.js org1 bidder1 auction4 800)
   echo "$OUT"
   BID1=$(echo "$OUT" | grep -oE '[a-f0-9]{64}') || true
   echo "BidID1=$BID1"
-  run node submitBid.js org1 bidder1 auction1 $BID1
+  run node submitBid.js org1 bidder1 auction4 $BID1
 
   # bidder2
-  OUT=$(node bid.js org1 bidder2 auction1 500)
+  OUT=$(node bid.js org1 bidder2 auction4 500)
   echo "$OUT"
   BID2=$(echo "$OUT" | grep -oE '[a-f0-9]{64}') || true
   echo "BidID2=$BID2"
-  run node submitBid.js org1 bidder2 auction1 $BID2
+  run node submitBid.js org1 bidder2 auction4 $BID2
 
   # bidder3
-  OUT=$(node bid.js org2 bidder3 auction1 700)
+  OUT=$(node bid.js org2 bidder3 auction4 700)
   echo "$OUT"
   BID3=$(echo "$OUT" | grep -oE '[a-f0-9]{64}') || true
   echo "BidID3=$BID3"
-  run node submitBid.js org2 bidder3 auction1 $BID3
+  run node submitBid.js org2 bidder3 auction4 $BID3
 
   # bidder4
-  OUT=$(node bid.js org2 bidder4 auction1 900)
+  OUT=$(node bid.js org2 bidder4 auction4 900)
   echo "$OUT"
   BID4=$(echo "$OUT" | grep -oE '[a-f0-9]{64}') || true
   echo "BidID4=$BID4"
-  run node submitBid.js org2 bidder4 auction1 $BID4
+  run node submitBid.js org2 bidder4 auction4 $BID4
 
   echo "Close auction (seller)"
-  run node closeAuction.js org1 seller auction1
+  run node closeAuction.js org1 seller auction4
 
   echo "Reveal bids"
-  run node revealBid.js org1 bidder1 auction1 $BID1
-  run node revealBid.js org1 bidder2 auction1 $BID2
-  run node revealBid.js org2 bidder3 auction1 $BID3
-  run node revealBid.js org2 bidder4 auction1 $BID4
+  run node revealBid.js org1 bidder1 auction4 $BID1
+  run node revealBid.js org1 bidder2 auction4 $BID2
+  run node revealBid.js org2 bidder3 auction4 $BID3
+  run node revealBid.js org2 bidder4 auction4 $BID4
+
+  echo "Balances before endAuction"
+  run node getMyBalance.js org1 seller
+  # check likely winner (bidder4) balance
+  run node getMyBalance.js org2 bidder4
 
   echo "End auction (seller)"
-  run node endAuction.js org1 seller auction1
+  run node endAuction.js org1 seller auction4
+
+  echo "Balances after endAuction"
+  run node getMyBalance.js org1 seller
+  run node getMyBalance.js org2 bidder4
 
   popd >/dev/null
 
@@ -176,10 +200,10 @@ elif [ "$CLIENT" = "go" ]; then
   pushd "$APP_GO_DIR" >/dev/null
 
   echo "(Go) create asset"
-  run go run assetTransfer.go createAsset asset1 blue 5 User1@org1.example.com 1300
+  run go run assetTransfer.go createAsset asset4 blue 5 User1@org1.example.com 1300
 
   echo "(Go) create auction"
-  run go run assetTransfer.go createAuction auction1 asset1
+  run go run assetTransfer.go createAuction auction4 asset4
 
   echo "Note: The Go client cannot register/enroll users in this sample."
   echo "If you want to run bid/reveal flows with Go you must ensure the user identities exist in the test-network crypto material."

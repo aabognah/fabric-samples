@@ -14,6 +14,8 @@ The auction process is designed to ensure privacy and fair play:
 4.  **Revealing Bids:** After the auction is closed, bidders can reveal their full bids. The chaincode verifies that the revealed bid matches the previously submitted hash and the private bid, ensuring integrity.
 5.  **Ending the Auction:** The seller ends the auction. The chaincode determines the highest revealed bid, transfers the asset to the winner, and updates the auction status. The `EndAuction` transaction requires endorsement from all participating organizations, which prevents premature ending if there are unrevealed winning bids.
 
+    Note: the chaincode includes a simple on-chain "balance" bookkeeping mechanism for demo purposes. When an auction is ended the chaincode will transfer the asset's `AppraisedValue` from the winning bidder's balance to the seller's balance and then transfer ownership of the asset.
+
 ## Prerequisites
 
 Before running this sample, you will need to have the following installed:
@@ -190,6 +192,32 @@ node revealBid.js org2 bidder4 auction1 $BIDDER4_BID_ID
 node endAuction.js org1 seller auction1
 ```
 
+Balance transfer and helper scripts
+
+When `endAuction` is executed the chaincode will attempt to move the asset's `AppraisedValue` from the buyer to the seller before transferring ownership. If the buyer does not have enough balance the `endAuction` call will fail.
+
+For convenience the sample provides a couple of helper JS scripts to inspect balances and assets:
+
+- `getMyBalance.js` — calls chaincode `GetMyBalance` and returns the balance for the submitting client identity (no owner argument required).
+- `queryAllAssets.js` — calls `GetAllAssets` and attempts to decode the `Owner` (serialized identity) into a friendly label by scanning the local wallets; it adds an `OwnerDecoded` field to the printed output.
+
+Example: check balances before and after ending the auction (run from `application-javascript`):
+
+```
+# check seller balance
+node getMyBalance.js org1 seller
+
+# check bidder4 (likely winner) balance
+node getMyBalance.js org2 bidder4
+
+# end auction
+node endAuction.js org1 seller auction1
+
+# re-check balances
+node getMyBalance.js org1 seller
+node getMyBalance.js org2 bidder4
+```
+
 4. Notes on the JS application
 
 The JS scripts use the helper utilities in `test-application/javascript`
@@ -205,4 +233,10 @@ When done, remove the wallets and bring down the network:
 rm -rf asset-transfer-auction/application-javascript/wallet
 cd test-network
 ./network.sh down
+```
+
+Tip: the repository includes a convenience demo script `scripts/run_demo.sh`. It supports a `--reuse-wallets` flag that will skip the JS CA enroll/register steps when wallets already exist under `application-javascript/wallet`:
+
+```
+./scripts/run_demo.sh --redeploy-cc --client js --reuse-wallets
 ```
