@@ -11,7 +11,7 @@ const { buildCCPOrg1, buildCCPOrg2, buildWallet, prettyJSONString } = require('.
 const myChannel = 'mychannel';
 const myChaincodeName = 'auction';
 
-async function createAsset(ccp,wallet,user,assetID,color,size,owner,appraisedValue) {
+async function createAsset(ccp,wallet,user,org,assetID,color,size,owner,appraisedValue) {
 	try {
 		const gateway = new Gateway();
 
@@ -21,10 +21,40 @@ async function createAsset(ccp,wallet,user,assetID,color,size,owner,appraisedVal
 		const network = await gateway.getNetwork(myChannel);
 		const contract = network.getContract(myChaincodeName);
 
-		console.log('\n--> Submit Transaction: CreateAsset');
-		// Use submitTransaction for fabric-network Contract API
-		await contract.submitTransaction('CreateAsset', assetID, color, size.toString(), owner, appraisedValue.toString());
-		console.log('*** Result: committed');
+		console.log('\n--> Submit Transaction: CreateAsset (with private asset_properties transient)');
+		// Build transient data containing confidential asset properties
+		const transient = {
+			asset_properties: Buffer.from(JSON.stringify({ AppraisedValue: parseInt(appraisedValue), ReservePrice: parseInt(appraisedValue) }))
+		};
+		const tx = contract.createTransaction('CreateAsset');
+		// Limit endorsing organizations to the submitting org when writing private data
+		// to that org's implicit collection. This avoids endorsement mismatches where
+		// peers from other orgs simulate private-data writes they cannot access.
+		const orgMSP = (org.toLowerCase().startsWith('org1')) ? 'Org1MSP' : 'Org2MSP';
+		tx.setEndorsingOrganizations(orgMSP);
+		tx.setTransient(transient);
+		try {
+			await tx.submit(assetID, color, size.toString(), owner, appraisedValue.toString());
+			console.log('*** Result: committed (with transient)');
+		} catch (err) {
+			console.error('CreateAsset with transient failed:', err.message ? err.message : err);
+			// If the failure looks like an endorsement / policy failure, retry without transient
+			if (err.message && (err.message.includes('ENDORSEMENT_POLICY_FAILURE') || err.message.includes('ENDORSEMENT') || err.message.includes('Peer endorsements do not match'))) {
+				console.log('Retrying CreateAsset without transient data (falling back to public appraisedValue)');
+				// fallback: do a plain submit without transient private data, still target the same org
+				const tx2 = contract.createTransaction('CreateAsset');
+				tx2.setEndorsingOrganizations(orgMSP);
+				try {
+					await tx2.submit(assetID, color, size.toString(), owner, appraisedValue.toString());
+					console.log('*** Result: committed (without transient)');
+				} catch (err2) {
+					console.error('Retry without transient also failed:', err2.message ? err2.message : err2);
+					throw err2;
+				}
+			} else {
+				throw err;
+			}
+		}
 
 		let result = await contract.evaluateTransaction('ReadAsset', assetID);
 		console.log('*** Result: Asset: ' + prettyJSONString(result.toString()));
@@ -55,12 +85,12 @@ async function main() {
 			const ccp = buildCCPOrg1();
 			const walletPath = path.join(__dirname, 'wallet/org1');
 			const wallet = await buildWallet(Wallets, walletPath);
-			await createAsset(ccp,wallet,user,assetID,color,size,owner,appraisedValue);
+			await createAsset(ccp,wallet,user,org,assetID,color,size,owner,appraisedValue);
 		} else if (org === 'Org2' || org === 'org2') {
 			const ccp = buildCCPOrg2();
 			const walletPath = path.join(__dirname, 'wallet/org2');
 			const wallet = await buildWallet(Wallets, walletPath);
-			await createAsset(ccp,wallet,user,assetID,color,size,owner,appraisedValue);
+			await createAsset(ccp,wallet,user,org,assetID,color,size,owner,appraisedValue);
 		} else {
 			console.log('Org must be Org1 or Org2');
 		}

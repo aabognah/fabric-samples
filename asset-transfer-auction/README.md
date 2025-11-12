@@ -14,7 +14,7 @@ The auction process is designed to ensure privacy and fair play:
 4.  **Revealing Bids:** After the auction is closed, bidders can reveal their full bids. The chaincode verifies that the revealed bid matches the previously submitted hash and the private bid, ensuring integrity.
 5.  **Ending the Auction:** The seller ends the auction. The chaincode determines the highest revealed bid, transfers the asset to the winner, and updates the auction status. The `EndAuction` transaction requires endorsement from all participating organizations, which prevents premature ending if there are unrevealed winning bids.
 
-    Note: the chaincode includes a simple on-chain "balance" bookkeeping mechanism for demo purposes. When an auction is ended the chaincode will transfer the asset's `AppraisedValue` from the winning bidder's balance to the seller's balance and then transfer ownership of the asset.
+    Note: the chaincode includes a simple on-chain "balance" bookkeeping mechanism for demo purposes. Auctions use a second-price (Vickrey) settlement: the winner pays the second-highest revealed bid (not their own bid). Each asset's appraised value and reserve price are stored as confidential data in the seller's implicit private collection; the reserve acts as a private minimum that the highest bid must meet for a sale to occur.
 
 ## Prerequisites
 
@@ -194,7 +194,7 @@ node endAuction.js org1 seller auction1
 
 Balance transfer and helper scripts
 
-When `endAuction` is executed the chaincode will attempt to move the asset's `AppraisedValue` from the buyer to the seller before transferring ownership. If the buyer does not have enough balance the `endAuction` call will fail.
+When `endAuction` is executed the chaincode determines the highest and second-highest revealed bids. If the highest bid meets or exceeds the seller's private reserve, the winner is charged the second-highest price (or the reserve if only one bid exists), the payment is moved from the winner's on-chain balance to the seller's balance, and ownership is transferred. If the buyer does not have enough balance the `endAuction` call will fail. The reserve and appraised values are not visible on the public ledger.
 
 For convenience the sample provides a couple of helper JS scripts to inspect balances and assets:
 

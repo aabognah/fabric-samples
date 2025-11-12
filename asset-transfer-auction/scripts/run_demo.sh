@@ -134,49 +134,49 @@ if [ "$CLIENT" = "js" ]; then
   fi
 
   echo "Creating asset via JS createAsset.js..."
-  # create asset: asset4 blue 5 seller 500
-  run node createAsset.js org1 seller asset4 blue 5 seller 500
+  # create asset: asset1 blue 5 seller 500
+  run node createAsset.js org1 seller asset1 blue 5 seller 500
 
   echo "Creating auction (seller)..."
-  run node createAuction.js org1 seller auction4 asset4
+  run node createAuction.js org1 seller auction1 asset1
 
   echo "Bidding and submitting bids"
   # bidder1
-  OUT=$(node bid.js org1 bidder1 auction4 800)
+  OUT=$(node bid.js org1 bidder1 auction1 800)
   echo "$OUT"
   BID1=$(echo "$OUT" | grep -oE '[a-f0-9]{64}') || true
   echo "BidID1=$BID1"
-  run node submitBid.js org1 bidder1 auction4 $BID1
+  run node submitBid.js org1 bidder1 auction1 $BID1
 
   # bidder2
-  OUT=$(node bid.js org1 bidder2 auction4 500)
+  OUT=$(node bid.js org1 bidder2 auction1 500)
   echo "$OUT"
   BID2=$(echo "$OUT" | grep -oE '[a-f0-9]{64}') || true
   echo "BidID2=$BID2"
-  run node submitBid.js org1 bidder2 auction4 $BID2
+  run node submitBid.js org1 bidder2 auction1 $BID2
 
   # bidder3
-  OUT=$(node bid.js org2 bidder3 auction4 700)
+  OUT=$(node bid.js org2 bidder3 auction1 700)
   echo "$OUT"
   BID3=$(echo "$OUT" | grep -oE '[a-f0-9]{64}') || true
   echo "BidID3=$BID3"
-  run node submitBid.js org2 bidder3 auction4 $BID3
+  run node submitBid.js org2 bidder3 auction1 $BID3
 
   # bidder4
-  OUT=$(node bid.js org2 bidder4 auction4 900)
+  OUT=$(node bid.js org2 bidder4 auction1 900)
   echo "$OUT"
   BID4=$(echo "$OUT" | grep -oE '[a-f0-9]{64}') || true
   echo "BidID4=$BID4"
-  run node submitBid.js org2 bidder4 auction4 $BID4
+  run node submitBid.js org2 bidder4 auction1 $BID4
 
   echo "Close auction (seller)"
-  run node closeAuction.js org1 seller auction4
+  run node closeAuction.js org1 seller auction1
 
   echo "Reveal bids"
-  run node revealBid.js org1 bidder1 auction4 $BID1
-  run node revealBid.js org1 bidder2 auction4 $BID2
-  run node revealBid.js org2 bidder3 auction4 $BID3
-  run node revealBid.js org2 bidder4 auction4 $BID4
+  run node revealBid.js org1 bidder1 auction1 $BID1
+  run node revealBid.js org1 bidder2 auction1 $BID2
+  run node revealBid.js org2 bidder3 auction1 $BID3
+  run node revealBid.js org2 bidder4 auction1 $BID4
 
   echo "Balances before endAuction"
   run node getMyBalance.js org1 seller
@@ -184,7 +184,7 @@ if [ "$CLIENT" = "js" ]; then
   run node getMyBalance.js org2 bidder4
 
   echo "End auction (seller)"
-  run node endAuction.js org1 seller auction4
+  run node endAuction.js org1 seller auction1
 
   echo "Balances after endAuction"
   run node getMyBalance.js org1 seller
@@ -200,10 +200,10 @@ elif [ "$CLIENT" = "go" ]; then
   pushd "$APP_GO_DIR" >/dev/null
 
   echo "(Go) create asset"
-  run go run assetTransfer.go createAsset asset4 blue 5 User1@org1.example.com 1300
+  run go run assetTransfer.go createAsset asset1 blue 5 User1@org1.example.com 1300
 
   echo "(Go) create auction"
-  run go run assetTransfer.go createAuction auction4 asset4
+  run go run assetTransfer.go createAuction auction1 asset1
 
   echo "Note: The Go client cannot register/enroll users in this sample."
   echo "If you want to run bid/reveal flows with Go you must ensure the user identities exist in the test-network crypto material."

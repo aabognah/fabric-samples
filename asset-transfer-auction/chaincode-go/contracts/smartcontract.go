@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"strconv"
 	"regexp"
 	"strings"
@@ -25,13 +26,19 @@ type SmartContract struct {
 
 // Asset describes basic details of what makes up a simple asset
 type Asset struct {
-	AppraisedValue int    `json:"AppraisedValue"`
 	Color          string `json:"Color"`
 	ID             string `json:"ID"`
 	Owner          string `json:"Owner"`
 	// OwnerLabel is a short, human-friendly label for the owner (e.g. "org1/seller")
 	OwnerLabel     string `json:"OwnerLabel"`
 	Size           int    `json:"Size"`
+}
+
+// AssetPrivate contains confidential information about an asset stored in
+// the owner's implicit private data collection.
+type AssetPrivate struct {
+	AppraisedValue int `json:"AppraisedValue"`
+	ReservePrice   int `json:"ReservePrice"`
 }
 
 // Auction data
@@ -53,6 +60,8 @@ type FullBid struct {
 	Price  int    `json:"price"`
 	Org    string `json:"org"`
 	Bidder string `json:"bidder"`
+	// OwnerLabel is a human-friendly label for the bidder identity (e.g. "org1/bidder1")
+	OwnerLabel string `json:"ownerLabel"`
 }
 
 // BidHash is the structure of a private bid
@@ -66,12 +75,12 @@ const bidKeyType = "bid"
 // InitLedger adds a base set of assets to the ledger
 func (s *SmartContract) InitLedger(ctx contractapi.TransactionContextInterface) error {
 	assets := []Asset{
-		{ID: "asset1", Color: "blue", Size: 5, Owner: "Tomoko", OwnerLabel: "Tomoko", AppraisedValue: 300},
-		{ID: "asset2", Color: "red", Size: 5, Owner: "Brad", OwnerLabel: "Brad", AppraisedValue: 400},
-		{ID: "asset3", Color: "green", Size: 10, Owner: "Jin Soo", OwnerLabel: "Jin Soo", AppraisedValue: 500},
-		{ID: "asset4", Color: "yellow", Size: 10, Owner: "Max", OwnerLabel: "Max", AppraisedValue: 600},
-		{ID: "asset5", Color: "black", Size: 15, Owner: "Adriana", OwnerLabel: "Adriana", AppraisedValue: 700},
-		{ID: "asset6", Color: "white", Size: 15, Owner: "Michel", OwnerLabel: "Michel", AppraisedValue: 800},
+		{ID: "asset1", Color: "blue", Size: 5, Owner: "Tomoko", OwnerLabel: "Tomoko"},
+		{ID: "asset2", Color: "red", Size: 5, Owner: "Brad", OwnerLabel: "Brad"},
+		{ID: "asset3", Color: "green", Size: 10, Owner: "Jin Soo", OwnerLabel: "Jin Soo"},
+		{ID: "asset4", Color: "yellow", Size: 10, Owner: "Max", OwnerLabel: "Max"},
+		{ID: "asset5", Color: "black", Size: 15, Owner: "Adriana", OwnerLabel: "Adriana"},
+		{ID: "asset6", Color: "white", Size: 15, Owner: "Michel", OwnerLabel: "Michel"},
 	}
 
 	for _, asset := range assets {
@@ -103,19 +112,58 @@ func (s *SmartContract) CreateAsset(ctx contractapi.TransactionContextInterface,
 	ownerLabel := deriveOwnerLabel(owner)
 
 	asset := Asset{
-		ID:             id,
-		Color:          color,
-		Size:           size,
-		Owner:          owner,
-		OwnerLabel:     ownerLabel,
-		AppraisedValue: appraisedValue,
+		ID:         id,
+		Color:      color,
+		Size:       size,
+		Owner:      owner,
+		OwnerLabel: ownerLabel,
 	}
 	assetJSON, err := json.Marshal(asset)
 	if err != nil {
 		return err
 	}
 
-	return ctx.GetStub().PutState(id, assetJSON)
+	// Store public asset
+	if err := ctx.GetStub().PutState(id, assetJSON); err != nil {
+		return err
+	}
+
+	// Store confidential asset details (AppraisedValue/ReservePrice) in the
+	// submitting client's implicit collection. The client should pass these
+	// values via the transient map key 'asset_properties'. If not provided,
+	// fall back to the appraisedValue parameter (less private but preserves
+	// backward compatibility).
+	var private AssetPrivate
+	transientMap, _ := ctx.GetStub().GetTransient()
+	if tjson, ok := transientMap["asset_properties"]; ok {
+		if err := json.Unmarshal(tjson, &private); err != nil {
+			return fmt.Errorf("failed to unmarshal transient asset properties: %v", err)
+		}
+	} else {
+		// fallback: use passed parameter for both appraised and reserve
+		private = AssetPrivate{AppraisedValue: appraisedValue, ReservePrice: appraisedValue}
+	}
+
+	collection, err := getCollectionName(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get implicit collection name: %v", err)
+	}
+
+	privateKey, err := ctx.GetStub().CreateCompositeKey("assetPrivate", []string{id})
+	if err != nil {
+		return fmt.Errorf("failed to create composite key for private asset: %v", err)
+	}
+
+	privateJSON, err := json.Marshal(private)
+	if err != nil {
+		return fmt.Errorf("failed to marshal private asset: %v", err)
+	}
+
+	if err := ctx.GetStub().PutPrivateData(collection, privateKey, privateJSON); err != nil {
+		return fmt.Errorf("failed to put private asset data: %v", err)
+	}
+
+	return nil
 }
 
 // ReadAsset returns the asset stored in the world state with given id.
@@ -151,19 +199,46 @@ func (s *SmartContract) UpdateAsset(ctx contractapi.TransactionContextInterface,
 	ownerLabel := deriveOwnerLabel(owner)
 
 	asset := Asset{
-		ID:             id,
-		Color:          color,
-		Size:           size,
-		Owner:          owner,
-		OwnerLabel:     ownerLabel,
-		AppraisedValue: appraisedValue,
+		ID:         id,
+		Color:      color,
+		Size:       size,
+		Owner:      owner,
+		OwnerLabel: ownerLabel,
 	}
 	assetJSON, err := json.Marshal(asset)
 	if err != nil {
 		return err
 	}
 
-	return ctx.GetStub().PutState(id, assetJSON)
+	if err := ctx.GetStub().PutState(id, assetJSON); err != nil {
+		return err
+	}
+
+	// Optionally update confidential properties from transient map
+	transientMap, _ := ctx.GetStub().GetTransient()
+	if tjson, ok := transientMap["asset_properties"]; ok {
+		var private AssetPrivate
+		if err := json.Unmarshal(tjson, &private); err != nil {
+			return fmt.Errorf("failed to unmarshal transient asset properties: %v", err)
+		}
+		collection, err := getCollectionName(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to get implicit collection name: %v", err)
+		}
+		privateKey, err := ctx.GetStub().CreateCompositeKey("assetPrivate", []string{id})
+		if err != nil {
+			return fmt.Errorf("failed to create composite key for private asset: %v", err)
+		}
+		privateJSON, err := json.Marshal(private)
+		if err != nil {
+			return fmt.Errorf("failed to marshal private asset: %v", err)
+		}
+		if err := ctx.GetStub().PutPrivateData(collection, privateKey, privateJSON); err != nil {
+			return fmt.Errorf("failed to put private asset data: %v", err)
+		}
+	}
+
+	return nil
 }
 
 // DeleteAsset deletes an given asset from the world state.
@@ -292,6 +367,13 @@ func (s *SmartContract) CreateAuction(ctx contractapi.TransactionContextInterfac
 		return fmt.Errorf("failed to put auction in public data: %v", err)
 	}
 
+	// Initialize state-based endorsement so that only the seller's org
+	// (the creator of the auction) is required to endorse updates by default.
+	// Additional bidder orgs will be added when they submit bids.
+	if err := setAssetStateBasedEndorsement(ctx, auctionID, clientOrgID); err != nil {
+		return fmt.Errorf("failed to set state-based endorsement for auction: %v", err)
+	}
+
 	return nil
 }
 
@@ -399,7 +481,8 @@ func (s *SmartContract) SubmitBid(ctx contractapi.TransactionContextInterface, a
 	if !(contains(Orgs, clientOrgID)) {
 		newOrgs := append(Orgs, clientOrgID)
 		auction.Orgs = newOrgs
-
+		// Add the bidder org to the auction's state-based endorsement so that
+		// future updates to the auction require endorsement by this org as well.
 		err = addAssetStateBasedEndorsement(ctx, auctionID, clientOrgID)
 		if err != nil {
 			return fmt.Errorf("failed setting state based endorsement for new organization: %v", err)
@@ -520,10 +603,11 @@ func (s *SmartContract) RevealBid(ctx contractapi.TransactionContextInterface, a
 
 	// marshal transient parameters and ID and MSPID into bid object
 	NewBid := FullBid{
-		Type:   bidKeyType,
-		Price:  bidInput.Price,
-		Org:    bidInput.Org,
-		Bidder: bidInput.Bidder,
+		Type:       bidKeyType,
+		Price:      bidInput.Price,
+		Org:        bidInput.Org,
+		Bidder:     bidInput.Bidder,
+		OwnerLabel: deriveOwnerLabel(bidInput.Bidder),
 	}
 
 	// check 4: make sure that the transaction is being submitted is the bidder
@@ -618,55 +702,66 @@ func (s *SmartContract) EndAuction(ctx contractapi.TransactionContextInterface, 
 		return fmt.Errorf("no bids have been revealed, cannot end auction: %v", err)
 	}
 
-	// determine the highest bid
+	// Build sorted list of revealed bid prices and map price -> FullBid
+	var bidPrices []int
+	priceToBid := make(map[int]FullBid)
 	for _, bid := range revealedBidMap {
-		if bid.Price > auction.Price {
-			auction.Winner = bid.Bidder
-			auction.Price = bid.Price
-		}
+		bidPrices = append(bidPrices, bid.Price)
+		priceToBid[bid.Price] = bid
 	}
 
-	// check if there is a winning bid that has yet to be revealed
-	err = checkForHigherBid(ctx, auction.Price, auction.RevealedBids, auction.PrivateBids)
-	if err != nil {
+	if len(bidPrices) == 0 {
+		return fmt.Errorf("no bids have been revealed, cannot end auction: %v", err)
+	}
+
+	sort.Sort(sort.Reverse(sort.IntSlice(bidPrices)))
+
+	highest := bidPrices[0]
+	var secondHighest int
+	if len(bidPrices) > 1 {
+		secondHighest = bidPrices[1]
+	}
+
+	// Ensure there are no unrevealed private bids remaining. This avoids
+	// any private-data reads during endorsement, and maintains auction
+	// integrity by refusing to end the auction until all bidders have
+	// revealed their bids.
+	if err = checkForHigherBid(ctx, highest, auction.RevealedBids, auction.PrivateBids); err != nil {
 		return fmt.Errorf("cannot end auction: %v", err)
 	}
 
-	auction.Status = "ended"
-
-	endedAuctionJSON, _ := json.Marshal(auction)
-
-	err = ctx.GetStub().PutState(auctionID, endedAuctionJSON)
-	if err != nil {
-		return fmt.Errorf("failed to end auction: %v", err)
+	// Determine amount to charge the winner: Vickrey (second-price). If
+	// there's only one revealed bid, charge that bid amount.
+	amountToCharge := highest
+	if len(bidPrices) > 1 {
+		amountToCharge = secondHighest
 	}
 
-	// Transfer asset to the winner
-	if auction.Winner != "" {
-		// Before transferring ownership, move the asset's AppraisedValue from buyer to seller
-		asset, err := s.ReadAsset(ctx, auction.ItemSold)
-		if err != nil {
-			return fmt.Errorf("failed to read asset for payment: %v", err)
-		}
-		amount := asset.AppraisedValue
+	// identify winner from highest price
+	winnerBid := priceToBid[highest]
+	auction.Winner = winnerBid.Bidder
+	auction.Price = amountToCharge
 
-		// Debit buyer
-		_, err = s.AdjustBalance(ctx, auction.Winner, -amount)
-		if err != nil {
-			return fmt.Errorf("failed to debit buyer: %v", err)
-		}
+	// perform payment: debit buyer and credit seller
+	_, err = s.AdjustBalance(ctx, auction.Winner, -amountToCharge)
+	if err != nil {
+		return fmt.Errorf("failed to debit buyer: %v", err)
+	}
+	_, err = s.AdjustBalance(ctx, auction.Seller, amountToCharge)
+	if err != nil {
+		return fmt.Errorf("failed to credit seller: %v", err)
+	}
 
-		// Credit seller
-		_, err = s.AdjustBalance(ctx, auction.Seller, amount)
-		if err != nil {
-			return fmt.Errorf("failed to credit seller: %v", err)
-		}
+	// transfer the asset
+	_, err = s.TransferAsset(ctx, auction.ItemSold, auction.Winner)
+	if err != nil {
+		return fmt.Errorf("failed to transfer asset to winner: %v", err)
+	}
 
-		// Now transfer the asset
-		_, err = s.TransferAsset(ctx, auction.ItemSold, auction.Winner)
-		if err != nil {
-			return fmt.Errorf("failed to transfer asset to winner: %v", err)
-		}
+	auction.Status = "ended"
+	endedAuctionJSON, _ := json.Marshal(auction)
+	if err := ctx.GetStub().PutState(auctionID, endedAuctionJSON); err != nil {
+		return fmt.Errorf("failed to write ended auction: %v", err)
 	}
 
 	return nil
@@ -952,27 +1047,18 @@ func (s *SmartContract) AdjustBalance(ctx contractapi.TransactionContextInterfac
 }
 
 func checkForHigherBid(ctx contractapi.TransactionContextInterface, highestPrice int, revealedBids map[string]FullBid, privateBids map[string]BidHash) error {
-	// check if there is a winning bid that has yet to be revealed
-	for id, hash := range privateBids {
-		// check if the bid has been revealed
+	// For correctness across endorsers, do not attempt to read private data
+	// from implicit collections here — peers from different orgs may not
+	// have access to those collections and would produce differing
+	// read/write sets, causing endorsement mismatches. Instead, require
+	// that all bids be revealed before ending the auction. If any private
+	// bid remains unrevealed, abort ending the auction so the seller can
+	// wait for reveals or take other action.
+	for id := range privateBids {
 		if _, ok := revealedBids[id]; !ok {
-			// get the hash of the bid from the private data collection
-			collection, err := getCollectionName(ctx)
-			if err != nil {
-				return fmt.Errorf("failed to get implicit collection name: %v", err)
-			}
-			bidHash, err := ctx.GetStub().GetPrivateDataHash(collection, id)
-			if err != nil {
-				return fmt.Errorf("failed to read bid bash from collection: %v", err)
-			}
-			if bidHash == nil {
-				return fmt.Errorf("bid hash does not exist: %s", id)
-			}
-			// compare the hash of the bid with the hash on the public ledger
-			if hash.Hash != fmt.Sprintf("%x", bidHash) {
-				return fmt.Errorf("hash of bid %s does not match hash on public ledger", id)
-			}
+			return fmt.Errorf("cannot end auction: bid %s has not been revealed", id)
 		}
 	}
+
 	return nil
 }
